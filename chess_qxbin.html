@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simple 3D Chess - QxBin Hex It</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#060d16;font-family:system-ui,sans-serif}
+#wrap{position:relative;width:100%;height:100%}
+#info{position:absolute;top:10px;left:10px;color:#ff914d;z-index:10;background:rgba(39,66,99,0.9);padding:10px 14px;border-radius:8px;max-width:250px;backdrop-filter:blur(6px);border:1px solid #38b6ff;font-size:13px}
+#moves{position:absolute;top:10px;right:10px;color:#7ed957;z-index:10;background:rgba(39,66,99,0.9);padding:10px;border-radius:8px;width:170px;max-height:65%;overflow-y:auto;font-size:12px;backdrop-filter:blur(6px);border:1px solid #38b6ff}
+button{margin:4px 4px 0 0;padding:6px 10px;cursor:pointer;background:#274263;color:#fff;border:1px solid #7ed957;border-radius:5px;font-size:11px}
+button:hover{background:#38b6ff;color:#0a0a12}
+canvas{display:block;width:100%!important;height:100%!important}
+</style>
+</head>
+<body>
+<div id="wrap">
+<div id="info">QxBin Chess | Turn: White<br>
+<button onclick="resetGame()">Reset</button>
+<button onclick="qxSuggest()">QxBin Suggest</button>
+<button onclick="downloadPDF()">Download PDF</button>
+<button id="spinBtn" onclick="toggleSpin()">Spin: On</button>
+</div>
+<div id="moves"><b>Moves</b><br><span id="movelist">—</span></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+const wrap = document.getElementById('wrap');
+function getSize(){ return {w: wrap.clientWidth||window.innerWidth||600, h: wrap.clientHeight||window.innerHeight||500}; }
+const {w:initW, h:initH} = getSize();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x060d16);
+scene.fog = new THREE.Fog(0x060d16, 16, 40);
+
+const camera = new THREE.PerspectiveCamera(44, initW/initH, 0.1, 100);
+camera.position.set(0, 12.8, 13.5);
+camera.lookAt(0,0,0);
+
+const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
+renderer.setSize(initW, initH);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+wrap.appendChild(renderer.domElement);
+
+const hemi = new THREE.HemisphereLight(0x88aacc, 0x0a1520, 0.5);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xfff0e0, 1.2);
+dir.position.set(6,15,8);
+dir.castShadow = true;
+dir.shadow.mapSize.set(2048,2048);
+dir.shadow.camera.near=1; dir.shadow.camera.far=40;
+dir.shadow.camera.left=dir.shadow.camera.bottom=-12;
+dir.shadow.camera.right=dir.shadow.camera.top=12;
+dir.shadow.bias=-0.0003;
+scene.add(dir);
+const fill = new THREE.PointLight(0x38b6ff, 0.4, 28);
+fill.position.set(-7,5,-5); scene.add(fill);
+const accent = new THREE.PointLight(0xff914d, 0.25, 20);
+accent.position.set(5,4,-8); scene.add(accent);
+
+const game = new Chess();
+const boardGroup = new THREE.Group();
+scene.add(boardGroup);
+const pieces = {};
+const squareSize = 1.2;
+const offset = 3.5 * squareSize;
+let moveHistory = [];
+let selected = null;
+let legalHighlights = [];
+let autoSpin = true;
+let isDragging = false;
+let dragDist = 0;
+let prevX = 0, prevY = 0;
+
+function createBoard(){
+  const rim = new THREE.Mesh(
+    new THREE.BoxGeometry(squareSize*8.4, 0.3, squareSize*8.4),
+    new THREE.MeshStandardMaterial({color:0x1a2a3a, roughness:0.5, metalness:0.2})
+  );
+  rim.position.y = -0.09; rim.receiveShadow = true; rim.castShadow = true;
+  boardGroup.add(rim);
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const isLight = (r+c)%2===0;
+    const sq = new THREE.Mesh(
+      new THREE.BoxGeometry(squareSize*0.95, 0.15, squareSize*0.95),
+      new THREE.MeshStandardMaterial({color: isLight?0x274263:0xff914d, roughness:isLight?0.55:0.45, metalness:0.12})
+    );
+    sq.position.set(c*squareSize-offset, 0.02, r*squareSize-offset);
+    sq.receiveShadow = true;
+    sq.userData = {file:c, rank:r};
+    boardGroup.add(sq);
+  }
+}
+createBoard();
+
+function makePiece(type, color){
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({
+    color: color==='w'?0xf0f4f8:0x12151a,
+    roughness: color==='w'?0.3:0.4,
+    metalness: color==='w'?0.3:0.18,
+    emissive: color==='w'?0x0a0a12:0x000000
+  });
+  if(type==='p'){
+    const body=new THREE.Mesh(new THREE.CylinderGeometry(0.21,0.27,0.36,16),mat); body.position.y=0.21;
+    const head=new THREE.Mesh(new THREE.SphereGeometry(0.19,12,10),mat); head.position.y=0.48;
+    g.add(body,head);
+  } else if(type==='r'){
+    const body=new THREE.Mesh(new THREE.CylinderGeometry(0.27,0.31,0.48,12),mat); body.position.y=0.27;
+    const top=new THREE.Mesh(new THREE.BoxGeometry(0.48,0.16,0.48),mat); top.position.y=0.58;
+    g.add(body,top);
+  } else if(type==='n'){
+    const body=new THREE.Mesh(new THREE.CylinderGeometry(0.19,0.29,0.33,10),mat); body.position.y=0.19;
+    const neck=new THREE.Mesh(new THREE.BoxGeometry(0.21,0.33,0.33),mat); neck.position.set(0.04,0.46,0);
+    const head=new THREE.Mesh(new THREE.ConeGeometry(0.21,0.38,8),mat); head.rotation.z=-0.55; head.position.set(0.11,0.7,0);
+    g.add(body,neck,head);
+  } else if(type==='b'){
+    const body=new THREE.Mesh(new THREE.CylinderGeometry(0.17,0.27,0.43,12),mat); body.position.y=0.24;
+    const mid=new THREE.Mesh(new THREE.SphereGeometry(0.21,12,10),mat); mid.position.y=0.53;
+    const tip=new THREE.Mesh(new THREE.ConeGeometry(0.11,0.26,8),mat); tip.position.y=0.8;
+    g.add(body,mid,tip);
+  } else if(type==='q'){
+    const body=new THREE.Mesh(new THREE.CylinderGeometry(0.21,0.31,0.52,14),mat); body.position.y=0.28;
+    const crown=new THREE.Mesh(new THREE.CylinderGeometry(0.31,0.17,0.2,8),mat); crown.position.y=0.65;
+    const ball=new THREE.Mesh(new THREE.SphereGeometry(0.11,10,8),mat); ball.position.y=0.85;
+    g.add(body,crown,ball);
+  } else {
+    const body=new THREE.Mesh(new THREE.CylinderGeometry(0.23,0.31,0.52,14),mat); body.position.y=0.28;
+    const crossV=new THREE.Mesh(new THREE.BoxGeometry(0.09,0.34,0.09),mat); crossV.position.y=0.76;
+    const crossH=new THREE.Mesh(new THREE.BoxGeometry(0.26,0.09,0.09),mat); crossH.position.y=0.7;
+    g.add(body,crossV,crossH);
+  }
+  g.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; }});
+  return g;
+}
+
+function placePieces(){
+  Object.values(pieces).forEach(p=>boardGroup.remove(p));
+  for(let k in pieces) delete pieces[k];
+  const board = game.board();
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = board[r][c];
+    if(!p) continue;
+    const mesh = makePiece(p.type, p.color);
+    mesh.position.set(c*squareSize-offset, 0.1, r*squareSize-offset);
+    mesh.userData = {sq:String.fromCharCode(97+c)+(8-r), type:p.type, color:p.color};
+    boardGroup.add(mesh);
+    pieces[mesh.userData.sq] = mesh;
+  }
+}
+placePieces();
+
+function clearLegal(){
+  legalHighlights.forEach(m=>boardGroup.remove(m));
+  legalHighlights = [];
+}
+function showLegal(sq){
+  clearLegal();
+  game.moves({square:sq, verbose:true}).forEach(m=>{
+    const file = m.to.charCodeAt(0)-97;
+    const rank = 8-parseInt(m.to[1]);
+    const marker = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.18,0.18,0.06,16),
+      new THREE.MeshBasicMaterial({color:0x7ed957, transparent:true, opacity:0.8})
+    );
+    marker.position.set(file*squareSize-offset, 0.14, rank*squareSize-offset);
+    marker.userData = {isLegal:true, to:m.to};
+    boardGroup.add(marker);
+    legalHighlights.push(marker);
+  });
+}
+function highlight(mesh){
+  Object.values(pieces).forEach(p=>p.scale.set(1,1,1));
+  clearLegal();
+  if(mesh){ mesh.scale.set(1.18,1.18,1.18); showLegal(mesh.userData.sq); }
+}
+
+function tryMove(from, to){
+  const move = game.move({from, to, promotion:'q'});
+  if(move){
+    moveHistory.push(move.san);
+    clearLegal();
+    placePieces();
+    selected = null;
+    updateInfo();
+  }
+}
+
+function updateInfo(){
+  let status = `QxBin Chess | Turn: ${game.turn()==='w'?'White':'Black'}`;
+  if(game.in_checkmate()) status += ' | Checkmate';
+  else if(game.in_check()) status += ' | Check';
+  else if(game.in_draw()) status += ' | Draw';
+  document.getElementById('info').innerHTML = status + `<br>
+  <button onclick="resetGame()">Reset</button>
+  <button onclick="qxSuggest()">QxBin Suggest</button>
+  <button onclick="downloadPDF()">Download PDF</button>
+  <button id="spinBtn" onclick="toggleSpin()">Spin: ${autoSpin?'On':'Off'}</button>`;
+  const hist = game.history();
+  let txt = '';
+  for(let i=0;i<hist.length;i+=2){
+    txt += (Math.floor(i/2)+1)+'. '+hist[i]+(hist[i+1]?' '+hist[i+1]:'')+'<br>';
+  }
+  document.getElementById('movelist').innerHTML = txt || '—';
+  moveHistory = hist.slice();
+}
+
+function resetGame(){
+  game.reset();
+  moveHistory = [];
+  clearLegal();
+  placePieces();
+  selected = null;
+  updateInfo();
+}
+
+// QxBin Edge-style (master v2) — Binary Probability Matrix collapse for move selection
+function qxSuggest(){
+  const moves = game.moves({verbose:true});
+  if(!moves.length) return;
+
+  const N = moves.length;
+  let probs = new Array(N).fill(1/N);
+
+  const features = moves.map(m => {
+    const file = m.to.charCodeAt(0) - 97;
+    const rank = parseInt(m.to[1], 10);
+    let b = 0.55;
+    b += (3.5 - Math.abs(file - 3.5)) * 0.04;
+    b += (game.turn()==='w' ? (rank-1) : (8-rank)) * 0.025;
+    if(m.captured) b += 0.12;
+    if(m.san.includes('+') || m.san.includes('#')) b += 0.15;
+    if(m.flags && m.flags.includes('k')) b += 0.06;
+    return Math.min(0.92, Math.max(0.25, b));
+  });
+
+  const steps = 5, powerN = 3, powerM = 1;
+  for(let s=0; s<steps; s++){
+    const next = new Array(N);
+    let sum = 0;
+    for(let i=0; i<N; i++){
+      const bias = features[i];
+      const frac = Math.pow(bias, powerN);
+      const tail = Math.pow(1 - bias, powerM);
+      next[i] = (probs[i] * frac + (1 - probs[i]) * tail) * 0.5 + probs[i] * 0.5;
+      sum += next[i];
+    }
+    for(let i=0; i<N; i++) probs[i] = next[i] / (sum || 1);
+  }
+
+  let r = Math.random(), cum = 0, chosen = 0;
+  for(let i=0; i<N; i++){
+    cum += probs[i];
+    if(r <= cum){ chosen = i; break; }
+  }
+  const best = moves[chosen];
+
+  const move = game.move(best);
+  if(move){
+    moveHistory.push(move.san);
+    clearLegal();
+    placePieces();
+    selected = null;
+    updateInfo();
+  }
+}
+
+function downloadPDF(){
+  try{
+    const jsPDF = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+    if(!jsPDF){ alert('jsPDF failed to load'); return; }
+    const doc = new jsPDF();
+    doc.setFontSize(16);
+    doc.text('3D Chess Game - QxBin Hex It', 20, 20);
+    doc.setFontSize(11);
+    doc.text('Moves:', 20, 35);
+    const hist = game.history();
+    let y = 45;
+    for(let i=0;i<hist.length;i+=2){
+      const line = (Math.floor(i/2)+1)+'. '+hist[i]+(hist[i+1]?' '+hist[i+1]:'');
+      doc.text(line, 20, y);
+      y += 8;
+      if(y>270){ doc.addPage(); y=20; }
+    }
+    if(hist.length===0) doc.text('(no moves)', 20, 45);
+    let result = 'In progress';
+    if(game.in_checkmate()) result = (game.turn()==='w'?'Black':'White')+' wins';
+    else if(game.in_draw()) result = 'Draw';
+    doc.text('Result: '+result, 20, y+12);
+    doc.save('chess_qxbin.pdf');
+  }catch(err){
+    console.error(err);
+    alert('PDF error: '+err.message);
+  }
+}
+
+function toggleSpin(){
+  autoSpin = !autoSpin;
+  const btn = document.getElementById('spinBtn');
+  if(btn) btn.textContent = 'Spin: '+(autoSpin?'On':'Off');
+}
+
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+function onClick(e){
+  if(dragDist > 6) return;
+  if(e.target.tagName==='BUTTON' || e.target.closest('button')) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((e.clientX-rect.left)/rect.width)*2-1;
+  mouse.y = -((e.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(boardGroup.children, true);
+  if(!hits.length){ if(selected){ selected=null; highlight(null); } return; }
+  let obj = hits[0].object;
+  while(obj.parent && !obj.userData.sq && obj.userData.file===undefined && !obj.userData.isLegal) obj=obj.parent;
+
+  if(obj.userData.isLegal && selected){ tryMove(selected.userData.sq, obj.userData.to); return; }
+  if(obj.userData.sq){
+    if(selected && selected.userData.color===game.turn()){
+      const ok = game.move({from:selected.userData.sq, to:obj.userData.sq, promotion:'q'});
+      if(ok){ game.undo(); tryMove(selected.userData.sq, obj.userData.sq); }
+      else if(obj.userData.color===game.turn()){ selected=obj; highlight(obj); }
+    } else if(obj.userData.color===game.turn()){ selected=obj; highlight(obj); }
+  } else if(selected && obj.userData.file!==undefined){
+    tryMove(selected.userData.sq, String.fromCharCode(97+obj.userData.file)+(8-obj.userData.rank));
+  } else if(selected){ selected=null; highlight(null); }
+}
+
+renderer.domElement.addEventListener('click', onClick);
+renderer.domElement.addEventListener('pointerdown', e=>{
+  if(e.button!==0) return;
+  isDragging=true; dragDist=0; prevX=e.clientX; prevY=e.clientY;
+  try{ renderer.domElement.setPointerCapture(e.pointerId); }catch(_){}
+});
+renderer.domElement.addEventListener('pointermove', e=>{
+  if(!isDragging) return;
+  const dx=e.clientX-prevX, dy=e.clientY-prevY;
+  dragDist += Math.abs(dx)+Math.abs(dy);
+  boardGroup.rotation.y += dx*0.005;
+  boardGroup.rotation.x = Math.max(-0.6, Math.min(0.4, boardGroup.rotation.x+dy*0.005));
+  prevX=e.clientX; prevY=e.clientY;
+});
+renderer.domElement.addEventListener('pointerup', e=>{
+  isDragging=false;
+  try{ renderer.domElement.releasePointerCapture(e.pointerId); }catch(_){}
+});
+renderer.domElement.addEventListener('pointerleave', ()=>{ isDragging=false; });
+
+function onResize(){
+  const {w,h} = getSize();
+  camera.aspect = w/h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w,h);
+}
+window.addEventListener('resize', onResize);
+if(window.ResizeObserver) new ResizeObserver(onResize).observe(wrap);
+
+function animate(){
+  requestAnimationFrame(animate);
+  if(autoSpin && !isDragging) boardGroup.rotation.y += 0.0005;
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
