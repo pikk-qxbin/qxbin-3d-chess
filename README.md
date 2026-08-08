@@ -20,4 +20,8 @@ Open `chess_qxbin.html` or embed:
 ## Stack
 Three.js · chess.js · jsPDF · QxBin logic
 
+## License
+**Dual license** — MIT + QxBin Custom Terms (see [LICENSE](LICENSE)).  
+Choose either. Attribution for QxBin methods appreciated: *QxBin · Rupesh Malpani · pikk.company*
+
 By [Rupesh Malpani](https://github.com/pikk-qxbin) · pikk.company
